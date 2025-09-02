@@ -1,0 +1,367 @@
+# ============================================================================
+# SCRIPT INTEGRADO - BUSCA DE LIVRARIAS E BIBLIOTECAS EM SÃO PAULO
+# ============================================================================
+
+# PARÂMETROS GERAIS
+url <- "https://places.googleapis.com/v1/places:searchText"
+raio_busca <- 10000 # 10km para cada ponto
+
+# MÚLTIPLAS COORDENADAS ESTRATÉGICAS EM SÃO PAULO
+coordenadas <- data.frame(
+  latitude = c(
+    -23.5505,  # Centro - Marco Zero (Praça da Sé)
+    -23.4618,  # Zona Norte - Santana  
+    -23.6532,  # Zona Sul - Santo Amaro
+    -23.5200,  # Zona Oeste - Pinheiros
+    -23.5589,  # Zona Leste - Mooca
+    -23.4200,  # Norte Extremo - Tucuruvi
+    -23.7000,  # Sul Extremo - Capela do Socorro
+    -23.4800,  # Noroeste - Lapa
+    -23.6200,  # Sudeste - Vila Prudente
+    -23.5100,  # Oeste Extremo - Butantã
+    -23.5900,  # Leste Extremo - Penha
+    -23.4900   # Nordeste - Vila Maria
+  ),
+  longitude = c(
+    -46.6333,  # Centro - Marco Zero
+    -46.6291,  # Zona Norte - Santana
+    -46.7074,  # Zona Sul - Santo Amaro  
+    -46.6911,  # Zona Oeste - Pinheiros
+    -46.5975,  # Zona Leste - Mooca
+    -46.6100,  # Norte Extremo - Tucuruvi
+    -46.7800,  # Sul Extremo - Capela do Socorro
+    -46.7050,  # Noroeste - Lapa
+    -46.5800,  # Sudeste - Vila Prudente
+    -46.7300,  # Oeste Extremo - Butantã
+    -46.5400,  # Leste Extremo - Penha
+    -46.6000   # Nordeste - Vila Maria
+  ),
+  nome_regiao = c(
+    "Centro", "Zona Norte", "Zona Sul", "Zona Oeste", "Zona Leste",
+    "Norte Extremo", "Sul Extremo", "Noroeste", "Sudeste", 
+    "Oeste Extremo", "Leste Extremo", "Nordeste"
+  )
+)
+
+field_mask <- "places.id,places.displayName,places.formattedAddress,places.location,places.types,places.rating,places.userRatingCount,nextPageToken"
+
+# Carregar pacotes
+library(httr)
+library(dplyr)
+library(jsonlite)
+
+# Chave da API
+api_nova <- " "
+
+# ============================================================================
+# FUNÇÃO PARA BUSCAR TODOS OS RESULTADOS
+# ============================================================================
+
+buscar_todos_resultados <- function(lat, lon, nome_regiao, texto_busca, tipo_estabelecimento, termos_exclusao = NULL, next_token = NULL) {
+  
+  # Monta o corpo da requisição
+  body <- list(
+    textQuery = texto_busca,
+    locationBias = list(
+      circle = list(
+        center = list(
+          latitude = lat,
+          longitude = lon
+        ),
+        radius = raio_busca
+      )
+    ),
+    rankPreference = "DISTANCE",
+    languageCode = "pt-BR",
+    includedType = tipo_estabelecimento,
+    strictTypeFiltering = "true"
+  )
+  
+  # Adiciona pageToken se existir
+  if (!is.null(next_token) && next_token != "") {
+    body$pageToken <- next_token
+  }
+  
+  # Faz a requisição
+  response <- POST(
+    url,
+    body = toJSON(body, auto_unbox = TRUE),
+    encode = "json",
+    add_headers(
+      `Content-Type` = "application/json",
+      `X-Goog-Api-Key` = api_nova,
+      `X-Goog-FieldMask` = field_mask
+    )
+  )
+  
+  # Processa a resposta
+  result <- content(response, "text", encoding = "UTF-8")
+  result_json <- fromJSON(result, flatten = TRUE)
+  
+  resultado_pagina <- data.frame()
+  
+  # Verifica se há resultados
+  if ("places" %in% names(result_json)) {
+    dados <- data.frame(
+      id = result_json$places$id, 
+      nome = result_json$places$displayName.text, 
+      endereco = result_json$places$formattedAddress, 
+      rating = result_json$places$rating, 
+      rating_count = result_json$places$userRatingCount, 
+      latitude = result_json$places$location.latitude, 
+      longitude = result_json$places$location.longitude,
+      regiao_busca = nome_regiao
+    )
+    
+    # Remove termos de exclusão se especificados
+    excluidos <- 0
+    if (!is.null(termos_exclusao)) {
+      for (termo in termos_exclusao) {
+        excluidos <- excluidos + sum(grepl(termo, dados$nome, ignore.case = TRUE))
+        dados <- dados[!grepl(termo, dados$nome, ignore.case = TRUE), ]
+      }
+    }
+    
+    resultado_pagina <- dados
+    
+    if (excluidos > 0) {
+      cat("Região:", nome_regiao, "- Página processada:", nrow(dados), "resultados (", excluidos, "termos excluídos removidos)\n")
+    } else {
+      cat("Região:", nome_regiao, "- Página processada:", nrow(dados), "resultados\n")
+    }
+    
+    # Verifica se há próxima página
+    if (!is.null(result_json$nextPageToken) && result_json$nextPageToken != "") {
+      cat("  → Próximo pageToken encontrado para", nome_regiao, ", buscando próxima página...\n")
+      Sys.sleep(2) # Pausa de 2 segundos entre requisições
+      
+      # Busca recursivamente a próxima página
+      proxima_pagina <- buscar_todos_resultados(lat, lon, nome_regiao, texto_busca, tipo_estabelecimento, termos_exclusao, result_json$nextPageToken)
+      resultado_pagina <- bind_rows(resultado_pagina, proxima_pagina)
+    }
+  } else {
+    cat("Região:", nome_regiao, "- Nenhum resultado encontrado\n")
+  }
+  
+  return(resultado_pagina)
+}
+
+# ============================================================================
+# FUNÇÃO PRINCIPAL DE BUSCA
+# ============================================================================
+
+executar_busca <- function(nome_tipo, texto_busca, tipo_estabelecimento, termos_exclusao = NULL) {
+  
+  cat("=== INICIANDO BUSCA DE", toupper(nome_tipo), "===\n")
+  cat("Texto de busca:", texto_busca, "\n")
+  cat("Tipo de estabelecimento:", tipo_estabelecimento, "\n")
+  if (!is.null(termos_exclusao)) {
+    cat("Termos de exclusão:", paste(termos_exclusao, collapse = ", "), "\n")
+  }
+  cat("Pontos de busca:", nrow(coordenadas), "\n\n")
+  
+  resultado_final <- data.frame()
+  
+  # Executa busca para cada coordenada
+  for (i in 1:nrow(coordenadas)) {
+    lat <- coordenadas$latitude[i]
+    lon <- coordenadas$longitude[i]
+    nome_regiao <- coordenadas$nome_regiao[i]
+    
+    cat("Buscando", nome_tipo, "na região:", nome_regiao, "(", lat, ",", lon, ")\n")
+    
+    # Busca todos os resultados para esta coordenada
+    resultados_coordenada <- buscar_todos_resultados(lat, lon, nome_regiao, texto_busca, tipo_estabelecimento, termos_exclusao)
+    
+    # Adiciona os dados ao dataframe final
+    resultado_final <- bind_rows(resultado_final, resultados_coordenada)
+    
+    cat("Subtotal região", nome_regiao, ":", nrow(resultados_coordenada), nome_tipo, "\n")
+    cat("Total acumulado:", nrow(resultado_final), nome_tipo, "\n\n")
+    
+    # Pausa entre regiões para evitar rate limiting
+    Sys.sleep(1)
+  }
+  
+  # Remove duplicatas baseadas no ID
+  resultados_antes_dedup <- nrow(resultado_final)
+  resultado_final <- resultado_final[!duplicated(resultado_final$id), ]
+  duplicatas_removidas <- resultados_antes_dedup - nrow(resultado_final)
+  
+  # Estatísticas finais
+  cat("=== BUSCA DE", toupper(nome_tipo), "FINALIZADA! ===\n")
+  cat("Total de resultados brutos:", resultados_antes_dedup, "\n")
+  cat("Duplicatas removidas:", duplicatas_removidas, "\n")
+  cat("Total de", nome_tipo, "únicas:", nrow(resultado_final), "\n")
+  if (!is.null(termos_exclusao)) {
+    cat("(Estabelecimentos com termos excluídos foram removidos)\n")
+  }
+  cat("\n")
+  
+  # Mostra distribuição por região
+  cat("=== DISTRIBUIÇÃO DE", toupper(nome_tipo), "POR REGIÃO ===\n")
+  distribuicao <- resultado_final %>% 
+    group_by(regiao_busca) %>% 
+    summarise(quantidade = n(), .groups = 'drop') %>%
+    arrange(desc(quantidade))
+  print(distribuicao)
+  cat("\n")
+  
+  return(resultado_final)
+}
+
+# ============================================================================
+# EXECUÇÃO DAS BUSCAS
+# ============================================================================
+
+cat("████████████████████████████████████████████████████████████████████████████████\n")
+cat("██                    MAPEAMENTO DE LIVRARIAS E BIBLIOTECAS                   ██\n")
+cat("██                            SÃO PAULO - SP                                 ██\n")
+cat("████████████████████████████████████████████████████████████████████████████████\n\n")
+
+# 1. BUSCA DE LIVRARIAS
+resultado_final_livrarias <- executar_busca(
+  nome_tipo = "livrarias",
+  texto_busca = "livaria", 
+  tipo_estabelecimento = "book_store",
+  termos_exclusao = c("sebo")
+)
+
+cat("🔄 Aguardando 3 segundos antes da próxima busca...\n\n")
+Sys.sleep(3)
+
+# REMOVER DUPLICADOS POR ENDEREÇO (LIVRARIAS)
+cat("Registros de livrarias antes da remoção de duplicados:", nrow(resultado_final_livrarias), "\n")
+resultado_final_livrarias <- resultado_final_livrarias %>%
+  distinct(endereco, .keep_all = TRUE) %>%
+  mutate(regiao_busca = "São Paulo - SP")
+cat("Registros de livrarias após remoção de duplicados:", nrow(resultado_final_livrarias), "\n")
+
+# 2. BUSCA DE BIBLIOTECAS  
+resultado_final_bibliotecas <- executar_busca(
+  nome_tipo = "bibliotecas",
+  texto_busca = "biblioteca", 
+  tipo_estabelecimento = "library",
+  termos_exclusao = NULL  # Sem exclusões para bibliotecas
+)
+
+# REMOVER DUPLICADOS POR ENDEREÇO (BIBLIOTECAS)
+cat("Registros de bibliotecas antes da remoção de duplicados:", nrow(resultado_final_bibliotecas), "\n")
+resultado_final_bibliotecas <- resultado_final_bibliotecas %>%
+  distinct(endereco, .keep_all = TRUE) %>%
+  mutate(regiao_busca = "São Paulo - SP")
+cat("Registros de bibliotecas após remoção de duplicados:", nrow(resultado_final_bibliotecas), "\n")
+
+# ============================================================================
+# RESUMO FINAL
+# ============================================================================
+
+cat("████████████████████████████████████████████████████████████████████████████████\n")
+cat("██                              RESUMO FINAL                                 ██\n")
+cat("████████████████████████████████████████████████████████████████████████████████\n")
+cat("📚 LIVRARIAS ENCONTRADAS:", nrow(resultado_final_livrarias), "\n")
+cat("📖 BIBLIOTECAS ENCONTRADAS:", nrow(resultado_final_bibliotecas), "\n")
+cat("🏢 TOTAL DE ESTABELECIMENTOS:", nrow(resultado_final_livrarias) + nrow(resultado_final_bibliotecas), "\n")
+cat("📍 PONTOS DE BUSCA UTILIZADOS:", nrow(coordenadas), "\n")
+cat("🕐 BUSCA REALIZADA EM:", format(Sys.time(), "%d/%m/%Y às %H:%M:%S"), "\n")
+cat("████████████████████████████████████████████████████████████████████████████████\n\n")
+
+# Primeiros resultados de cada tipo
+cat("=== PRIMEIRAS LIVRARIAS ENCONTRADAS ===\n")
+if (nrow(resultado_final_livrarias) > 0) {
+  print(head(resultado_final_livrarias))
+} else {
+  cat("Nenhuma livraria encontrada.\n")
+}
+
+cat("\n=== PRIMEIRAS BIBLIOTECAS ENCONTRADAS ===\n")
+if (nrow(resultado_final_bibliotecas) > 0) {
+  print(head(resultado_final_bibliotecas))
+} else {
+  cat("Nenhuma biblioteca encontrada.\n")
+}
+
+cat("\n🎉 BUSCA CONCLUÍDA! Agora você pode usar as tabelas:\n")
+cat("   • resultado_final_livrarias\n")
+cat("   • resultado_final_bibliotecas\n")
+
+# ==============================
+# GERAR ARQUIVO KML LIVRARIAS
+# ==============================
+cat("\n=== GERANDO ARQUIVO KMZ LIVRARIAS ===\n")
+
+# Criar conteúdo KML
+conteudo_kml <- criar_kml(resultado_final_livrarias, "livraria")
+
+# Nome dos arquivos
+nome_arquivo_base <- paste0("livrarias_sao_paulo_", format(Sys.Date(), "%Y%m%d"))
+arquivo_kml <- paste0(nome_arquivo_base, ".kml")
+arquivo_kmz <- paste0(nome_arquivo_base, ".kmz")
+
+# Salvar arquivo KML temporário
+writeLines(conteudo_kml, arquivo_kml, useBytes = TRUE)
+
+# Criar arquivo KMZ (KML compactado)
+if (file.exists(arquivo_kml)) {
+  # Compactar KML em KMZ
+  utils::zip(arquivo_kmz, arquivo_kml, flags = "-j") # -j remove path
+  
+  # Remover arquivo KML temporário (opcional)
+  file.remove(arquivo_kml)
+  
+  cat("✅ Arquivo KMZ de livrarias criado com sucesso!\n")
+  cat("📁 Nome do arquivo:", arquivo_kmz, "\n")
+  cat("📍 Total de pontos:", nrow(resultado_final_livrarias), "\n")
+  cat("📂 Localização:", getwd(), "\n")
+  
+} else {
+  cat("❌ Erro ao criar arquivo KML de livrarias\n")
+}
+
+# ==============================
+# GERAR ARQUIVO KML BIBLIOTECAS
+# ==============================
+cat("\n=== GERANDO ARQUIVO KMZ BIBLIOTECAS ===\n")
+
+# Criar conteúdo KML
+conteudo_kml <- criar_kml(resultado_final_bibliotecas, "biblioteca")
+
+# Nome dos arquivos
+nome_arquivo_base <- paste0("bibliotecas_sao_paulo_", format(Sys.Date(), "%Y%m%d"))
+arquivo_kml <- paste0(nome_arquivo_base, ".kml")
+arquivo_kmz <- paste0(nome_arquivo_base, ".kmz")
+
+# Salvar arquivo KML temporário
+writeLines(conteudo_kml, arquivo_kml, useBytes = TRUE)
+
+# Criar arquivo KMZ (KML compactado)
+if (file.exists(arquivo_kml)) {
+  # Compactar KML em KMZ
+  utils::zip(arquivo_kmz, arquivo_kml, flags = "-j") # -j remove path
+  
+  # Remover arquivo KML temporário (opcional)
+  file.remove(arquivo_kml)
+  
+  cat("✅ Arquivo KMZ de bibliotecas criado com sucesso!\n")
+  cat("📁 Nome do arquivo:", arquivo_kmz, "\n")
+  cat("📍 Total de pontos:", nrow(resultado_final_bibliotecas), "\n")
+  cat("📂 Localização:", getwd(), "\n")
+  
+} else {
+  cat("❌ Erro ao criar arquivo KML de bibliotecas\n")
+}
+
+# INSTRUÇÕES PARA USO NO GOOGLE MY MAPS
+cat("\n=== COMO USAR NO GOOGLE MY MAPS ===\n")
+cat("1. Acesse: https://mymaps.google.com\n")
+cat("2. Clique em 'Criar um novo mapa'\n") 
+cat("3. Clique em 'Importar'\n")
+cat("4. Selecione o arquivo KMZ desejado\n")
+cat("5. Escolha como exibir os dados (nome, endereço, etc.)\n")
+cat("6. Personalize cores e ícones conforme desejar\n")
+
+# ESTATÍSTICAS FINAIS
+cat("\n=== ESTATÍSTICAS DO MAPEAMENTO ===\n")
+cat("Total de livrarias mapeadas:", nrow(resultado_final_livrarias), "\n")
+cat("Total de bibliotecas mapeadas:", nrow(resultado_final_bibliotecas), "\n")
+cat("Data/hora:", format(Sys.time(), "%d/%m/%Y %H:%M:%S"), "\n")
